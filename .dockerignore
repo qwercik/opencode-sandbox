@@ -1,0 +1,8 @@
+.git/
+.gitattributes
+.gitignore
+.dockerignore
+.github/
+.opencode/
+test_sandbox_security.sh
+*.md

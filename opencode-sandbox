@@ -1,0 +1,286 @@
+#!/bin/bash
+set -euo pipefail
+
+VERSION="0.1.0"
+IMAGE="ghcr.io/qwercik/opencode-sandbox"
+SCRIPT_URL="https://raw.githubusercontent.com/qwercik/opencode-sandbox/master/opencode-sandbox"
+CACHE_DIR="$HOME/.cache/opencode-sandbox"
+SANDBOX_CONFIG="$HOME/.config/opencode-sandbox"
+PROJECT_NAME=$(basename "$PWD")
+PROJECT_MOUNT="/project/$PROJECT_NAME"
+
+CHAT_WORKSPACE=""
+if [ "$PWD" = "$HOME" ]; then
+  CHAT_BASE="$HOME/.local/share/opencode-sandbox/chats"
+  mkdir -p "$CHAT_BASE"
+  CHAT_ID="chat-$(date +%Y-%m-%d_%H-%M-%S)"
+  CHAT_DIR="$CHAT_BASE/$CHAT_ID"
+  mkdir -p "$CHAT_DIR"
+  CHAT_WORKSPACE="$CHAT_DIR"
+  PROJECT_NAME="$CHAT_ID"
+  PROJECT_MOUNT="/project/$CHAT_ID"
+fi
+
+# --- per-project data directory ---
+
+SANDBOX_DATA="$HOME/.local/share/opencode-sandbox"
+mkdir -p "$SANDBOX_DATA"
+
+SANDBOX_STATE="$HOME/.local/state/opencode-sandbox"
+mkdir -p "$SANDBOX_STATE"
+
+PROJECT_SLUG=$(echo "$PWD" | md5sum | cut -c1-12)
+PER_PROJECT_DIR="$SANDBOX_DATA/data/$PROJECT_SLUG"
+mkdir -p "$PER_PROJECT_DIR"
+
+AUTH_FILE="$SANDBOX_DATA/auth.json"
+touch "$AUTH_FILE"
+chmod 600 "$AUTH_FILE"
+
+pull_image() {
+  docker pull "$IMAGE:latest" 2>/dev/null || {
+    echo "-> Failed to pull image. Check your connection." >&2
+    exit 1
+  }
+}
+
+# --- script flags ---
+
+if [ "${1:-}" = "--update" ]; then
+  pull_image
+  echo "-> Done." >&2
+  exit 0
+fi
+
+if [ "${1:-}" = "--version" ]; then
+  echo "opencode-sandbox $VERSION"
+  exit 0
+fi
+
+if [ "${1:-}" = "--cleanup" ]; then
+  docker network prune --force --filter name=opencode- >/dev/null 2>&1 || true
+  echo "-> Done." >&2
+  exit 0
+fi
+
+# --- daily version check ---
+
+check_versions() {
+  mkdir -p "$CACHE_DIR"
+  local cache_file="$CACHE_DIR/last-check"
+
+  local now
+  now=$(date +%s)
+  local last_check=0
+  if [ -f "$cache_file" ]; then
+    last_check=$(cat "$cache_file")
+  fi
+
+  if [ $((now - last_check)) -lt 86400 ]; then
+    return
+  fi
+
+  local oc_latest oc_current script_latest
+
+  local gh_url="https://api.github.com/repos/anomalyco/opencode/releases/latest"
+  local sed_pat='s/.*"tag_name": *"v\([^"]*\)".*/\1/p'
+  oc_latest=$(curl -sS "$gh_url" | sed -n "$sed_pat" 2>/dev/null || true)
+  oc_latest=$(echo "$oc_latest" | grep -Ex '[0-9]+\.[0-9]+\.[0-9]+' || true)
+  oc_current=$(docker image inspect "$IMAGE:latest" \
+    --format '{{index .Config.Labels "org.opencontainers.image.version"}}' \
+    2>/dev/null | sed 's/^v//' || true)
+
+  if [ -n "$oc_latest" ] && [ -n "$oc_current" ] && [ "$oc_latest" != "$oc_current" ]; then
+    echo "-> New opencode version: $oc_latest (image has $oc_current)"
+    echo "  Update: opencode-sandbox --update"
+  fi
+
+  script_latest=$(curl -sS "$SCRIPT_URL" | sed -n 's/^VERSION="\(.*\)"/\1/p' 2>/dev/null || true)
+  script_latest=$(echo "$script_latest" | grep -Ex '[0-9]+\.[0-9]+\.[0-9]+' || true)
+
+  if [ -n "$script_latest" ] && [ "$script_latest" != "$VERSION" ]; then
+    echo "-> New opencode-sandbox script: $script_latest (yours: $VERSION)"
+    echo "  Download: curl -sSL $SCRIPT_URL -o"
+    echo "    ~/.local/bin/opencode-sandbox && chmod +x ~/.local/bin/opencode-sandbox"
+  fi
+
+  echo "$now" > "$cache_file"
+}
+
+# --- izolowana siec i firewall ---
+
+IPTABLES_HELPER="$IMAGE:latest"
+
+iptables_host() {
+  docker run --rm --entrypoint sh --cap-add=NET_ADMIN --cap-add=NET_RAW --net=host -i \
+    "$IPTABLES_HELPER"
+}
+
+cleanup() {
+  if [ -z "${BRIDGE_NAME:-}" ] || [ -z "${SUBNET:-}" ]; then
+    docker network rm "${NET_NAME:-}" >/dev/null 2>&1 || true
+    rm -f "${TMP_ENV:-}" 2>/dev/null || true
+    return
+  fi
+
+  PORT_SCRIPT=""
+  if [ -n "${SANDBOX_ALLOW_HOST_PORTS:-}" ]; then
+    IFS=',' read -ra PORTS <<< "$SANDBOX_ALLOW_HOST_PORTS"
+    for port in "${PORTS[@]}"; do
+      PORT_SCRIPT="$PORT_SCRIPT
+    iptables -D INPUT -i ${BRIDGE_NAME} -p tcp --dport $port -j ACCEPT 2>/dev/null || true"
+    done
+  fi
+
+  iptables_host <<-SCRIPT || true
+    for priv in 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16; do
+      iptables -D DOCKER-USER -o ${BRIDGE_NAME} -s \$priv -d ${SUBNET} -j DROP 2>/dev/null || true
+      iptables -D DOCKER-USER -i ${BRIDGE_NAME} -s ${SUBNET} -d \$priv -j DROP 2>/dev/null || true
+    done
+    iptables -D DOCKER-USER -i ${BRIDGE_NAME} -o ${BRIDGE_NAME} -j DROP 2>/dev/null || true
+    iptables -D OUTPUT -o ${BRIDGE_NAME} -d ${SUBNET} \
+      -m state --state NEW -j DROP 2>/dev/null || true
+    iptables -D INPUT -i ${BRIDGE_NAME} -s ${SUBNET} -j DROP 2>/dev/null || true
+${PORT_SCRIPT}
+SCRIPT
+
+  docker network rm "$NET_NAME" >/dev/null 2>&1 || true
+  rm -f "${TMP_ENV:-}" 2>/dev/null || true
+}
+
+trap cleanup EXIT
+
+setup_network() {
+  local net_suffix
+  net_suffix="$$-$(date +%s)"
+  NET_NAME="opencode-${PROJECT_SLUG}-${net_suffix}"
+  BRIDGE_NAME="sb-$(echo "$net_suffix" | md5sum | cut -c1-8)"
+
+  docker network prune --force --filter name=opencode- >/dev/null 2>&1 || true
+
+  docker network create \
+    --driver bridge \
+    --opt "com.docker.network.bridge.name=$BRIDGE_NAME" \
+    --opt "com.docker.network.bridge.enable_icc=false" \
+    "$NET_NAME" >/dev/null
+
+  SUBNET=$(docker network inspect "$NET_NAME" \
+    --format '{{(index .IPAM.Config 0).Subnet}}')
+}
+
+setup_firewall() {
+  PORT_SCRIPT=""
+  if [ -n "${SANDBOX_ALLOW_HOST_PORTS:-}" ]; then
+    IFS=',' read -ra PORTS <<< "$SANDBOX_ALLOW_HOST_PORTS"
+    for port in "${PORTS[@]}"; do
+      PORT_SCRIPT="$PORT_SCRIPT
+    iptables -I INPUT -i ${BRIDGE_NAME} -p tcp --dport $port -j ACCEPT"
+    done
+  fi
+
+  iptables_host <<-SCRIPT
+    iptables -N DOCKER-USER 2>/dev/null || true
+${PORT_SCRIPT}
+    iptables -I INPUT -i ${BRIDGE_NAME} -s ${SUBNET} -j DROP
+    iptables -I OUTPUT -o ${BRIDGE_NAME} -d ${SUBNET} -m state --state NEW -j DROP
+    for priv in 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16; do
+      iptables -I DOCKER-USER -i ${BRIDGE_NAME} -s ${SUBNET} -d \$priv -j DROP
+      iptables -I DOCKER-USER -o ${BRIDGE_NAME} -s \$priv -d ${SUBNET} -j DROP
+    done
+    iptables -I DOCKER-USER -i ${BRIDGE_NAME} -o ${BRIDGE_NAME} -j DROP
+SCRIPT
+}
+
+# --- initialize sandbox config ---
+
+mkdir -p "$SANDBOX_CONFIG"
+
+# --- .env.agent ---
+
+ENV_AGENT_FLAGS=()
+TMP_ENV=""
+if [ -f "$PWD/.env.agent" ]; then
+  TMP_ENV=$(mktemp) && chmod 600 "$TMP_ENV"
+  while IFS= read -r line; do
+    case "$line" in
+      [A-Z_][A-Z0-9_]*=*) printf '%s\n' "$line" >> "$TMP_ENV" ;;
+      "#"*) ;;
+      '') ;;
+      *) echo "-> Skipping invalid .env.agent line: $line" >&2 ;;
+    esac
+  done < "$PWD/.env.agent"
+  if [ -s "$TMP_ENV" ]; then
+    ENV_AGENT_FLAGS=(--env-file "$TMP_ENV")
+    while IFS= read -r env_line; do
+      export "${env_line?}"
+    done < "$TMP_ENV"
+  else
+    rm -f "$TMP_ENV"
+    TMP_ENV=""
+  fi
+fi
+
+# --- validate SANDBOX_ALLOW_HOST_PORTS ---
+
+if [ -n "${SANDBOX_ALLOW_HOST_PORTS:-}" ]; then
+  if ! echo "$SANDBOX_ALLOW_HOST_PORTS" | grep -qE '^[0-9]+(,[0-9]+)*$'; then
+    echo "-> SANDBOX_ALLOW_HOST_PORTS has invalid format:" >&2
+    echo "  $SANDBOX_ALLOW_HOST_PORTS (expected comma-separated ports)" >&2
+    SANDBOX_ALLOW_HOST_PORTS=""
+  else
+    IFS=',' read -ra PORTS <<< "$SANDBOX_ALLOW_HOST_PORTS"
+    for port in "${PORTS[@]}"; do
+      if [ "$port" -lt 1 ] || [ "$port" -gt 65535 ]; then
+        echo "-> SANDBOX_ALLOW_HOST_PORTS contains invalid port: $port" >&2
+        SANDBOX_ALLOW_HOST_PORTS=""
+        break
+      fi
+    done
+  fi
+fi
+
+# --- resolve symlinks ---
+
+EXTRA_MOUNTS=()
+shopt -s nullglob
+for entry in "$PWD"/*; do
+  [ -L "$entry" ] || continue
+  target=$(readlink -qe "$entry") || continue
+  case "$target" in
+    /etc/*|/proc/*|/sys/*|/dev/*|/boot/*|/lib/*|/usr/*|/bin/*|/sbin/*|/root)
+      echo "-> Skipping $entry -> $target (system path)" >&2
+      continue ;;
+  esac
+  EXTRA_MOUNTS+=(-v "$target:/project/$PROJECT_NAME/$(basename "$entry")")
+done
+shopt -u nullglob
+
+# --- launch ---
+
+if ! docker image inspect "$IMAGE:latest" >/dev/null 2>&1; then
+  echo "-> Pulling image..."
+  pull_image
+fi
+
+check_versions
+
+setup_network || { echo "FATAL: Failed to create sandbox network" >&2; exit 1; }
+setup_firewall || { echo "FATAL: Failed to setup firewall rules" >&2; exit 1; }
+
+docker run -it --rm \
+  --network "$NET_NAME" \
+  --add-host host.docker.internal:host-gateway \
+  --user "$(id -u):$(id -g)" \
+  --cap-drop=ALL \
+  --security-opt=no-new-privileges \
+  -e HOME=/home/sandbox \
+  -v "${CHAT_WORKSPACE:-$PWD}:$PROJECT_MOUNT" \
+  "${EXTRA_MOUNTS[@]}" \
+  -v "$SANDBOX_CONFIG:/home/sandbox/.config/opencode" \
+  -v "$PER_PROJECT_DIR:/home/sandbox/.local/share/opencode" \
+  -v "$AUTH_FILE:/home/sandbox/.local/share/opencode/auth.json" \
+  -v "$SANDBOX_STATE:/home/sandbox/.local/state" \
+  "${ENV_AGENT_FLAGS[@]}" \
+  --workdir "$PROJECT_MOUNT" \
+  "$IMAGE:latest" "$@"
+
