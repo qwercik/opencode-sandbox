@@ -57,12 +57,6 @@ if [ "${1:-}" = "--version" ]; then
   exit 0
 fi
 
-if [ "${1:-}" = "--cleanup" ]; then
-  docker network prune --force --filter name=opencode- >/dev/null 2>&1 || true
-  echo "-> Done." >&2
-  exit 0
-fi
-
 # --- daily version check ---
 
 check_versions() {
@@ -116,6 +110,32 @@ iptables_host() {
     "$IPTABLES_HELPER"
 }
 
+# Rules are added to the host kernel, so a SIGKILL, an OOM kill or a closed
+# terminal leaves them behind pointing at a bridge that no longer exists.
+# They only vanish on reboot (never, with netfilter-persistent), so sweep
+# orphans on every start instead of relying on the exit trap alone.
+
+gc_stale_rules() {
+  iptables_host <<-'SCRIPT' || true
+    iptables-save -t filter | grep -oE 'sb-[0-9a-f]{8}' | sort -u |
+    while read -r br; do
+      [ -e "/sys/class/net/$br" ] && continue
+      iptables-save -t filter |
+        grep -E "^-A (INPUT|OUTPUT|DOCKER-USER) " | grep -- "$br" |
+      while read -r rule; do
+        iptables $(echo "$rule" | sed 's/^-A /-D /') 2>/dev/null || true
+      done
+    done
+SCRIPT
+}
+
+if [ "${1:-}" = "--cleanup" ]; then
+  docker network prune --force --filter name=opencode- >/dev/null 2>&1 || true
+  gc_stale_rules
+  echo "-> Done." >&2
+  exit 0
+fi
+
 cleanup() {
   if [ -z "${BRIDGE_NAME:-}" ] || [ -z "${SUBNET:-}" ]; then
     docker network rm "${NET_NAME:-}" >/dev/null 2>&1 || true
@@ -148,7 +168,7 @@ SCRIPT
   rm -f "${TMP_ENV:-}" 2>/dev/null || true
 }
 
-trap cleanup EXIT
+trap cleanup EXIT INT TERM HUP
 
 setup_network() {
   local net_suffix
@@ -157,6 +177,7 @@ setup_network() {
   BRIDGE_NAME="sb-$(echo "$net_suffix" | md5sum | cut -c1-8)"
 
   docker network prune --force --filter name=opencode- >/dev/null 2>&1 || true
+  gc_stale_rules
 
   docker network create \
     --driver bridge \
@@ -197,23 +218,33 @@ mkdir -p "$SANDBOX_CONFIG"
 
 # --- .env.agent ---
 
+# Variables are passed to the container via --env-file only. Nothing from
+# .env.agent is ever exported into this script's environment: the file comes
+# from the project directory, so a hostile repo could otherwise override PATH
+# and hijack the docker/curl calls below.
+
 ENV_AGENT_FLAGS=()
 TMP_ENV=""
+ENV_AGENT_PORTS=""
 if [ -f "$PWD/.env.agent" ]; then
   TMP_ENV=$(mktemp) && chmod 600 "$TMP_ENV"
   while IFS= read -r line; do
     case "$line" in
+      "#"*|'') continue ;;
+    esac
+    case "${line%%=*}" in
+      PATH|IFS|ENV|BASH_ENV|SHELLOPTS|BASHOPTS|PS4|LD_*|BASH_FUNC_*)
+        echo "-> Refusing unsafe .env.agent variable: ${line%%=*}" >&2
+        continue ;;
+    esac
+    case "$line" in
+      SANDBOX_ALLOW_HOST_PORTS=*) ENV_AGENT_PORTS="${line#*=}" ;;
       [A-Z_][A-Z0-9_]*=*) printf '%s\n' "$line" >> "$TMP_ENV" ;;
-      "#"*) ;;
-      '') ;;
       *) echo "-> Skipping invalid .env.agent line: $line" >&2 ;;
     esac
   done < "$PWD/.env.agent"
   if [ -s "$TMP_ENV" ]; then
     ENV_AGENT_FLAGS=(--env-file "$TMP_ENV")
-    while IFS= read -r env_line; do
-      export "${env_line?}"
-    done < "$TMP_ENV"
   else
     rm -f "$TMP_ENV"
     TMP_ENV=""
@@ -222,7 +253,20 @@ fi
 
 # --- validate SANDBOX_ALLOW_HOST_PORTS ---
 
+# A value already present in the environment wins over .env.agent. Ports
+# coming from the file are limited to >= 1024, so a cloned repo cannot open
+# ssh or smtp on the host just by shipping an .env.agent.
+
+PORTS_FROM_FILE=0
+if [ -z "${SANDBOX_ALLOW_HOST_PORTS:-}" ] && [ -n "$ENV_AGENT_PORTS" ]; then
+  SANDBOX_ALLOW_HOST_PORTS="$ENV_AGENT_PORTS"
+  PORTS_FROM_FILE=1
+fi
+
 if [ -n "${SANDBOX_ALLOW_HOST_PORTS:-}" ]; then
+  MIN_PORT=1
+  [ "$PORTS_FROM_FILE" -eq 1 ] && MIN_PORT=1024
+
   if ! echo "$SANDBOX_ALLOW_HOST_PORTS" | grep -qE '^[0-9]+(,[0-9]+)*$'; then
     echo "-> SANDBOX_ALLOW_HOST_PORTS has invalid format:" >&2
     echo "  $SANDBOX_ALLOW_HOST_PORTS (expected comma-separated ports)" >&2
@@ -230,12 +274,18 @@ if [ -n "${SANDBOX_ALLOW_HOST_PORTS:-}" ]; then
   else
     IFS=',' read -ra PORTS <<< "$SANDBOX_ALLOW_HOST_PORTS"
     for port in "${PORTS[@]}"; do
-      if [ "$port" -lt 1 ] || [ "$port" -gt 65535 ]; then
+      if [ "$port" -lt "$MIN_PORT" ] || [ "$port" -gt 65535 ]; then
         echo "-> SANDBOX_ALLOW_HOST_PORTS contains invalid port: $port" >&2
+        [ "$PORTS_FROM_FILE" -eq 1 ] && \
+          echo "  (ports from .env.agent must be >= 1024)" >&2
         SANDBOX_ALLOW_HOST_PORTS=""
         break
       fi
     done
+  fi
+
+  if [ -n "$SANDBOX_ALLOW_HOST_PORTS" ] && [ "$PORTS_FROM_FILE" -eq 1 ]; then
+    echo "-> .env.agent opens host ports: $SANDBOX_ALLOW_HOST_PORTS" >&2
   fi
 fi
 
@@ -260,6 +310,13 @@ shopt -u nullglob
 if ! docker image inspect "$IMAGE:latest" >/dev/null 2>&1; then
   echo "-> Pulling image..."
   pull_image
+fi
+
+# Pin the helper to the exact image this run verified, so the NET_ADMIN
+# container cannot be swapped out from under us by a moving :latest tag.
+HELPER_ID=$(docker image inspect "$IMAGE:latest" --format '{{.Id}}' 2>/dev/null || true)
+if [ -n "$HELPER_ID" ]; then
+  IPTABLES_HELPER="$HELPER_ID"
 fi
 
 check_versions

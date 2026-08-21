@@ -10,7 +10,24 @@ on:
     - cron: '0 6 * * *'
 
 jobs:
+  # Runs a third-party action, so it gets its own job with a read-only token
+  # and no packages: write.
+  lint:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Run shellcheck
+        uses: ludeeus/action-shellcheck@00cae500b08a931fb5698e11e79bfbd38e612a38 # 2.0.0
+        with:
+          severity: style
+
   build:
+    needs: lint
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -19,16 +36,16 @@ jobs:
       attestations: none
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
+      # This code is COPYied into the image, so pin it to a commit.
       - uses: actions/checkout@v4
         with:
           repository: qwercik/opencode-tools
+          ref: 887c5b3bb811e9fb5e45578a308061914f8be809
           path: opencode-tools
-
-      - name: Run shellcheck
-        uses: ludeeus/action-shellcheck@master
-        with:
-          severity: style
+          persist-credentials: false
 
       - name: Get opencode version
         id: version
@@ -76,4 +93,3 @@ jobs:
             docker tag ghcr.io/${{ github.repository }}:test-build-${{ github.sha }} "$tag"
             docker push "$tag"
           done
-
