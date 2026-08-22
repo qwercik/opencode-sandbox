@@ -144,11 +144,14 @@ cleanup() {
   fi
 
   PORT_SCRIPT=""
+  DOCKER_USER_PORT_SCRIPT=""
   if [ -n "${SANDBOX_ALLOW_HOST_PORTS:-}" ]; then
     IFS=',' read -ra PORTS <<< "$SANDBOX_ALLOW_HOST_PORTS"
     for port in "${PORTS[@]}"; do
       PORT_SCRIPT="$PORT_SCRIPT
     iptables -D INPUT -i ${BRIDGE_NAME} -p tcp --dport $port -j ACCEPT 2>/dev/null || true"
+      DOCKER_USER_PORT_SCRIPT="$DOCKER_USER_PORT_SCRIPT
+    iptables -D DOCKER-USER -i ${BRIDGE_NAME} -p tcp --dport $port -j ACCEPT 2>/dev/null || true"
     done
   fi
 
@@ -162,6 +165,8 @@ cleanup() {
       -m state --state NEW -j DROP 2>/dev/null || true
     iptables -D INPUT -i ${BRIDGE_NAME} -s ${SUBNET} -j DROP 2>/dev/null || true
 ${PORT_SCRIPT}
+${DOCKER_USER_PORT_SCRIPT}
+    iptables -D DOCKER-USER -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT 2>/dev/null || true
 SCRIPT
 
   docker network rm "$NET_NAME" >/dev/null 2>&1 || true
@@ -191,24 +196,29 @@ setup_network() {
 
 setup_firewall() {
   PORT_SCRIPT=""
+  DOCKER_USER_PORT_SCRIPT=""
   if [ -n "${SANDBOX_ALLOW_HOST_PORTS:-}" ]; then
     IFS=',' read -ra PORTS <<< "$SANDBOX_ALLOW_HOST_PORTS"
     for port in "${PORTS[@]}"; do
       PORT_SCRIPT="$PORT_SCRIPT
     iptables -I INPUT -i ${BRIDGE_NAME} -p tcp --dport $port -j ACCEPT"
+      DOCKER_USER_PORT_SCRIPT="$DOCKER_USER_PORT_SCRIPT
+    iptables -I DOCKER-USER -i ${BRIDGE_NAME} -p tcp --dport $port -j ACCEPT"
     done
   fi
 
   iptables_host <<-SCRIPT
     iptables -N DOCKER-USER 2>/dev/null || true
-${PORT_SCRIPT}
     iptables -I INPUT -i ${BRIDGE_NAME} -s ${SUBNET} -j DROP
     iptables -I OUTPUT -o ${BRIDGE_NAME} -d ${SUBNET} -m state --state NEW -j DROP
+${PORT_SCRIPT}
     for priv in 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16; do
       iptables -I DOCKER-USER -i ${BRIDGE_NAME} -s ${SUBNET} -d \$priv -j DROP
       iptables -I DOCKER-USER -o ${BRIDGE_NAME} -s \$priv -d ${SUBNET} -j DROP
     done
     iptables -I DOCKER-USER -i ${BRIDGE_NAME} -o ${BRIDGE_NAME} -j DROP
+${DOCKER_USER_PORT_SCRIPT}
+    iptables -I DOCKER-USER -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
 SCRIPT
 }
 
@@ -283,10 +293,6 @@ if [ -n "${SANDBOX_ALLOW_HOST_PORTS:-}" ]; then
       fi
     done
   fi
-
-  if [ -n "$SANDBOX_ALLOW_HOST_PORTS" ] && [ "$PORTS_FROM_FILE" -eq 1 ]; then
-    echo "-> .env.agent opens host ports: $SANDBOX_ALLOW_HOST_PORTS" >&2
-  fi
 fi
 
 # --- resolve symlinks ---
@@ -308,7 +314,6 @@ shopt -u nullglob
 # --- launch ---
 
 if ! docker image inspect "$IMAGE:latest" >/dev/null 2>&1; then
-  echo "-> Pulling image..."
   pull_image
 fi
 
