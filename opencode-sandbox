@@ -37,6 +37,26 @@ AUTH_FILE="$SANDBOX_DATA/auth.json"
 touch "$AUTH_FILE"
 chmod 600 "$AUTH_FILE"
 
+# --- pre-flight: check for uncommitted opencode config changes ---
+
+if [ -d "$SANDBOX_CONFIG/.git" ]; then
+  if ! git -C "$SANDBOX_CONFIG" diff --cached --quiet 2>/dev/null; then
+    echo "ERROR: Uncommitted staged changes in $SANDBOX_CONFIG" >&2
+    echo "  Commit or stash them before starting the sandbox." >&2
+    exit 1
+  fi
+  if ! git -C "$SANDBOX_CONFIG" diff --quiet 2>/dev/null; then
+    echo "ERROR: Uncommitted unstaged changes in $SANDBOX_CONFIG" >&2
+    echo "  Commit or stash them before starting the sandbox." >&2
+    exit 1
+  fi
+  if [ -n "$(git -C "$SANDBOX_CONFIG" status --porcelain 2>/dev/null)" ]; then
+    echo "ERROR: Untracked or uncommitted changes in $SANDBOX_CONFIG" >&2
+    echo "  Commit or stash them before starting the sandbox." >&2
+    exit 1
+  fi
+fi
+
 pull_image() {
   docker pull "$IMAGE:latest" 2>/dev/null || {
     echo "-> Failed to pull image. Check your connection." >&2

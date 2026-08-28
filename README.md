@@ -58,7 +58,11 @@ The script pulls a pre-built lightweight Docker image from `ghcr.io/qwercik/open
 8. **Home directory** — if run from `$HOME`, a dedicated chat workspace is created in
    `~/.local/share/opencode-sandbox/chats/` instead of mounting the home directory.
 9. **Symlinks** — symlinks in the project directory pointing outside the workspace are
-   resolved and their targets are mounted individually (system paths are skipped).
+    resolved and their targets are mounted individually (system paths are skipped).
+10. **Config integrity** — before launching the container, the script checks that
+    `~/.config/opencode-sandbox/` (when it is a git repository) has no staged, unstaged
+    or untracked changes. This prevents accidental loss of opencode configuration
+    inside the sandbox.
 
 ## Commands
 
