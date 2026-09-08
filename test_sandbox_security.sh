@@ -1,7 +1,6 @@
 #!/bin/bash
-# NOTE: Tests assume full sandbox isolation (custom network, iptables,
-# user mapping, --cap-drop=ALL, --security-opt=no-new-privileges).
-# May not pass in a plain `docker run`.
+# NOTE: Tests assume --cap-drop=ALL, --security-opt=no-new-privileges,
+# non-root user, and read-only /proc /sys. May not pass in a plain `docker run`.
 set -euo pipefail
 
 PASS=0
@@ -29,35 +28,6 @@ check_fail() {
 echo "========================================"
 echo "  Sandbox Security Test"
 echo "========================================"
-echo ""
-
-# ---- Network Isolation ----
-echo "--- Network ---"
-
-check_fail 'timeout 3 wget -T 3 -q http://10.0.0.1:80/ 2>&1' \
-  N1 "10.0.0.0/8 should be blocked"
-
-check_fail 'timeout 3 wget -T 3 -q http://172.16.0.1:80/ 2>&1' \
-  N2 "172.16.0.0/12 should be blocked"
-
-check_fail 'timeout 3 wget -T 3 -q http://192.168.1.1:80/ 2>&1' \
-  N3 "192.168.0.0/16 should be blocked"
-
-check_fail 'timeout 3 wget -T 3 -q http://host.docker.internal:80/ 2>&1' \
-  N4 "host.docker.internal should be blocked"
-
-check_fail 'timeout 3 wget -T 3 -q http://host.docker.internal:22/ 2>&1' \
-  N5 "host port 22 must be blocked"
-
-check_fail 'timeout 3 wget -T 3 -q http://host.docker.internal:443/ 2>&1' \
-  N6 "host port 443 must be blocked"
-
-check_fail 'timeout 2 wget -T 2 -q http://127.0.0.1:80/ 2>&1' \
-  N7 "localhost should be unreachable"
-
-check_pass 'timeout 10 wget -T 5 -q http://example.com -O /dev/null 2>&1' \
-  N8 "internet should be reachable"
-
 echo ""
 
 # ---- Filesystem Isolation ----

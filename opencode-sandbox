@@ -121,126 +121,11 @@ check_versions() {
   echo "$now" > "$cache_file"
 }
 
-# --- izolowana siec i firewall ---
-
-IPTABLES_HELPER="$IMAGE:latest"
-
-iptables_host() {
-  docker run --rm --entrypoint sh --cap-add=NET_ADMIN --cap-add=NET_RAW --net=host -i \
-    "$IPTABLES_HELPER"
-}
-
-# Rules are added to the host kernel, so a SIGKILL, an OOM kill or a closed
-# terminal leaves them behind pointing at a bridge that no longer exists.
-# They only vanish on reboot (never, with netfilter-persistent), so sweep
-# orphans on every start instead of relying on the exit trap alone.
-
-gc_stale_rules() {
-  iptables_host <<-'SCRIPT' || true
-    iptables-save -t filter | grep -oE 'sb-[0-9a-f]{8}' | sort -u |
-    while read -r br; do
-      [ -e "/sys/class/net/$br" ] && continue
-      iptables-save -t filter |
-        grep -E "^-A (INPUT|OUTPUT|DOCKER-USER) " | grep -- "$br" |
-      while read -r rule; do
-        iptables $(echo "$rule" | sed 's/^-A /-D /') 2>/dev/null || true
-      done
-    done
-SCRIPT
-}
-
 if [ "${1:-}" = "--cleanup" ]; then
   docker network prune --force --filter name=opencode- >/dev/null 2>&1 || true
-  gc_stale_rules
   echo "-> Done." >&2
   exit 0
 fi
-
-cleanup() {
-  if [ -z "${BRIDGE_NAME:-}" ] || [ -z "${SUBNET:-}" ]; then
-    docker network rm "${NET_NAME:-}" >/dev/null 2>&1 || true
-    rm -f "${TMP_ENV:-}" 2>/dev/null || true
-    return
-  fi
-
-  PORT_SCRIPT=""
-  DOCKER_USER_PORT_SCRIPT=""
-  if [ -n "${SANDBOX_ALLOW_HOST_PORTS:-}" ]; then
-    IFS=',' read -ra PORTS <<< "$SANDBOX_ALLOW_HOST_PORTS"
-    for port in "${PORTS[@]}"; do
-      PORT_SCRIPT="$PORT_SCRIPT
-    iptables -D INPUT -i ${BRIDGE_NAME} -p tcp --dport $port -j ACCEPT 2>/dev/null || true"
-      DOCKER_USER_PORT_SCRIPT="$DOCKER_USER_PORT_SCRIPT
-    iptables -D DOCKER-USER -i ${BRIDGE_NAME} -p tcp --dport $port -j ACCEPT 2>/dev/null || true"
-    done
-  fi
-
-  iptables_host <<-SCRIPT || true
-    for priv in 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16; do
-      iptables -D DOCKER-USER -o ${BRIDGE_NAME} -s \$priv -d ${SUBNET} -j DROP 2>/dev/null || true
-      iptables -D DOCKER-USER -i ${BRIDGE_NAME} -s ${SUBNET} -d \$priv -j DROP 2>/dev/null || true
-    done
-    iptables -D DOCKER-USER -i ${BRIDGE_NAME} -o ${BRIDGE_NAME} -j DROP 2>/dev/null || true
-    iptables -D OUTPUT -o ${BRIDGE_NAME} -d ${SUBNET} \
-      -m state --state NEW -j DROP 2>/dev/null || true
-    iptables -D INPUT -i ${BRIDGE_NAME} -s ${SUBNET} -j DROP 2>/dev/null || true
-${PORT_SCRIPT}
-${DOCKER_USER_PORT_SCRIPT}
-    iptables -D DOCKER-USER -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT 2>/dev/null || true
-SCRIPT
-
-  docker network rm "$NET_NAME" >/dev/null 2>&1 || true
-  rm -f "${TMP_ENV:-}" 2>/dev/null || true
-}
-
-trap cleanup EXIT INT TERM HUP
-
-setup_network() {
-  local net_suffix
-  net_suffix="$$-$(date +%s)"
-  NET_NAME="opencode-${PROJECT_SLUG}-${net_suffix}"
-  BRIDGE_NAME="sb-$(echo "$net_suffix" | md5sum | cut -c1-8)"
-
-  docker network prune --force --filter name=opencode- >/dev/null 2>&1 || true
-  gc_stale_rules
-
-  docker network create \
-    --driver bridge \
-    --opt "com.docker.network.bridge.name=$BRIDGE_NAME" \
-    --opt "com.docker.network.bridge.enable_icc=false" \
-    "$NET_NAME" >/dev/null
-
-  SUBNET=$(docker network inspect "$NET_NAME" \
-    --format '{{(index .IPAM.Config 0).Subnet}}')
-}
-
-setup_firewall() {
-  PORT_SCRIPT=""
-  DOCKER_USER_PORT_SCRIPT=""
-  if [ -n "${SANDBOX_ALLOW_HOST_PORTS:-}" ]; then
-    IFS=',' read -ra PORTS <<< "$SANDBOX_ALLOW_HOST_PORTS"
-    for port in "${PORTS[@]}"; do
-      PORT_SCRIPT="$PORT_SCRIPT
-    iptables -I INPUT -i ${BRIDGE_NAME} -p tcp --dport $port -j ACCEPT"
-      DOCKER_USER_PORT_SCRIPT="$DOCKER_USER_PORT_SCRIPT
-    iptables -I DOCKER-USER -i ${BRIDGE_NAME} -p tcp --dport $port -j ACCEPT"
-    done
-  fi
-
-  iptables_host <<-SCRIPT
-    iptables -N DOCKER-USER 2>/dev/null || true
-    iptables -I INPUT -i ${BRIDGE_NAME} -s ${SUBNET} -j DROP
-    iptables -I OUTPUT -o ${BRIDGE_NAME} -d ${SUBNET} -m state --state NEW -j DROP
-${PORT_SCRIPT}
-    for priv in 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16; do
-      iptables -I DOCKER-USER -i ${BRIDGE_NAME} -s ${SUBNET} -d \$priv -j DROP
-      iptables -I DOCKER-USER -o ${BRIDGE_NAME} -s \$priv -d ${SUBNET} -j DROP
-    done
-    iptables -I DOCKER-USER -i ${BRIDGE_NAME} -o ${BRIDGE_NAME} -j DROP
-${DOCKER_USER_PORT_SCRIPT}
-    iptables -I DOCKER-USER -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
-SCRIPT
-}
 
 # --- initialize sandbox config ---
 
@@ -255,7 +140,6 @@ mkdir -p "$SANDBOX_CONFIG"
 
 ENV_AGENT_FLAGS=()
 TMP_ENV=""
-ENV_AGENT_PORTS=""
 if [ -f "$PWD/.env.agent" ]; then
   TMP_ENV=$(mktemp) && chmod 600 "$TMP_ENV"
   while IFS= read -r line; do
@@ -268,7 +152,7 @@ if [ -f "$PWD/.env.agent" ]; then
         continue ;;
     esac
     case "$line" in
-      SANDBOX_ALLOW_HOST_PORTS=*) ENV_AGENT_PORTS="${line#*=}" ;;
+      SANDBOX_NETWORK=*) SANDBOX_NETWORK="${line#*=}" ; printf '%s\n' "$line" >> "$TMP_ENV" ;;
       [A-Z_][A-Z0-9_]*=*) printf '%s\n' "$line" >> "$TMP_ENV" ;;
       *) echo "-> Skipping invalid .env.agent line: $line" >&2 ;;
     esac
@@ -281,38 +165,11 @@ if [ -f "$PWD/.env.agent" ]; then
   fi
 fi
 
-# --- validate SANDBOX_ALLOW_HOST_PORTS ---
+# --- sieć: SANDBOX_NETWORK z .env.agent ---
 
-# A value already present in the environment wins over .env.agent. Ports
-# coming from the file are limited to >= 1024, so a cloned repo cannot open
-# ssh or smtp on the host just by shipping an .env.agent.
-
-PORTS_FROM_FILE=0
-if [ -z "${SANDBOX_ALLOW_HOST_PORTS:-}" ] && [ -n "$ENV_AGENT_PORTS" ]; then
-  SANDBOX_ALLOW_HOST_PORTS="$ENV_AGENT_PORTS"
-  PORTS_FROM_FILE=1
-fi
-
-if [ -n "${SANDBOX_ALLOW_HOST_PORTS:-}" ]; then
-  MIN_PORT=1
-  [ "$PORTS_FROM_FILE" -eq 1 ] && MIN_PORT=1024
-
-  if ! echo "$SANDBOX_ALLOW_HOST_PORTS" | grep -qE '^[0-9]+(,[0-9]+)*$'; then
-    echo "-> SANDBOX_ALLOW_HOST_PORTS has invalid format:" >&2
-    echo "  $SANDBOX_ALLOW_HOST_PORTS (expected comma-separated ports)" >&2
-    SANDBOX_ALLOW_HOST_PORTS=""
-  else
-    IFS=',' read -ra PORTS <<< "$SANDBOX_ALLOW_HOST_PORTS"
-    for port in "${PORTS[@]}"; do
-      if [ "$port" -lt "$MIN_PORT" ] || [ "$port" -gt 65535 ]; then
-        echo "-> SANDBOX_ALLOW_HOST_PORTS contains invalid port: $port" >&2
-        [ "$PORTS_FROM_FILE" -eq 1 ] && \
-          echo "  (ports from .env.agent must be >= 1024)" >&2
-        SANDBOX_ALLOW_HOST_PORTS=""
-        break
-      fi
-    done
-  fi
+DOCKER_NET_ARGS=()
+if [ -n "${SANDBOX_NETWORK:-}" ]; then
+  DOCKER_NET_ARGS=(--network "$SANDBOX_NETWORK")
 fi
 
 # --- resolve symlinks ---
@@ -337,21 +194,10 @@ if ! docker image inspect "$IMAGE:latest" >/dev/null 2>&1; then
   pull_image
 fi
 
-# Pin the helper to the exact image this run verified, so the NET_ADMIN
-# container cannot be swapped out from under us by a moving :latest tag.
-HELPER_ID=$(docker image inspect "$IMAGE:latest" --format '{{.Id}}' 2>/dev/null || true)
-if [ -n "$HELPER_ID" ]; then
-  IPTABLES_HELPER="$HELPER_ID"
-fi
-
 check_versions
 
-setup_network || { echo "FATAL: Failed to create sandbox network" >&2; exit 1; }
-setup_firewall || { echo "FATAL: Failed to setup firewall rules" >&2; exit 1; }
-
 docker run -it --rm \
-  --network "$NET_NAME" \
-  --add-host host.docker.internal:host-gateway \
+  "${DOCKER_NET_ARGS[@]}" \
   --user "$(id -u):$(id -g)" \
   --cap-drop=ALL \
   --security-opt=no-new-privileges \
