@@ -196,8 +196,16 @@ fi
 
 check_versions
 
+# --- default: TUI + embedded server on port 4096 inside the container ---
+
+if [ $# -eq 0 ]; then
+  set -- --hostname 0.0.0.0 --port 4096
+fi
+
 docker run -it --rm \
   "${DOCKER_NET_ARGS[@]}" \
+  --label "agent-router.enabled=true" \
+  --label "agent-router.name=$(basename "$PWD")" \
   --user "$(id -u):$(id -g)" \
   --cap-drop=ALL \
   --security-opt=no-new-privileges \

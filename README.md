@@ -50,25 +50,27 @@ The script pulls a pre-built lightweight Docker image from `ghcr.io/qwercik/open
 4. **Updates** — every 24h it checks whether a newer version of opencode or the script
    is available and prompts `opencode-sandbox --update`.
 5. **Security** — the container runs with `--cap-drop=ALL` and `--security-opt=no-new-privileges`.
-6. **`.env.agent`** — if a `.env.agent` file exists in the project directory, its
+6. **Agent router** — the container is started with `--label agent-router.enabled=true` and `--label agent-router.name=<project-folder>` so that agent-router (e.g. Traefik) can discover and route to it.
+7. **Built-in server** — when run without arguments, the container starts the opencode TUI with its embedded HTTP server listening on `0.0.0.0:4096` inside the container. This allows agent-router (or any other service in the same Docker network) to reach the opencode API without exposing ports to the host.
+8. **`.env.agent`** — if a `.env.agent` file exists in the project directory, its
    variables are loaded into the container (only safe names are accepted).
    Use `SANDBOX_NETWORK=<network-name>` in `.env.agent` to attach the container
    to a specific Docker network. Without it, the container uses Docker's default
    bridge.
-7. **Home directory** — if run from `$HOME`, a dedicated chat workspace is created in
+8. **Home directory** — if run from `$HOME`, a dedicated chat workspace is created in
    `~/.local/share/opencode-sandbox/chats/` instead of mounting the home directory.
-8. **Symlinks** — symlinks in the project directory pointing outside the workspace are
+9. **Symlinks** — symlinks in the project directory pointing outside the workspace are
     resolved and their targets are mounted individually (system paths are skipped).
-9. **Config integrity** — before launching the container, the script checks that
-   `~/.config/opencode-sandbox/` (when it is a git repository) has no staged, unstaged
-   or untracked changes. This prevents accidental loss of opencode configuration
-   inside the sandbox.
+10. **Config integrity** — before launching the container, the script checks that
+    `~/.config/opencode-sandbox/` (when it is a git repository) has no staged, unstaged
+    or untracked changes. This prevents accidental loss of opencode configuration
+    inside the sandbox.
 
 ## Commands
 
 | Command | Effect |
 |---------|--------|
-| `opencode-sandbox` | Normal run |
+| `opencode-sandbox` | Normal run — TUI with embedded server on `0.0.0.0:4096` inside the container |
 | `opencode-sandbox --update` | Pulls the latest image from GitHub Container Registry |
 | `opencode-sandbox --cleanup` | Prunes orphaned sandbox networks created by older versions |
 | `opencode-sandbox --version` | Shows the script version |
