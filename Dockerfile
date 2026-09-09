@@ -16,4 +16,5 @@ RUN apk add --no-cache ca-certificates git libstdc++ libgcc bc curl tar python3 
 COPY --from=opencode /usr/local/bin/opencode /usr/local/bin/opencode
 COPY opencode-tools/scripts/. /usr/local/bin/
 COPY opencode-tools/plugin /home/sandbox/.config/opencode/plugins/
+EXPOSE 80
 ENTRYPOINT ["opencode"]
