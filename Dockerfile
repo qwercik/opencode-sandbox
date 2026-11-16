@@ -12,7 +12,11 @@ RUN apk add --no-cache curl tar && \
 
 FROM alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b
 RUN apk add --no-cache ca-certificates git libstdc++ libgcc bc curl tar python3 jq unzip && \
-    mkdir -p /home/sandbox/.config/opencode/plugins && chmod -R 777 /home/sandbox
+    mkdir -p /home/sandbox/.config/opencode/plugins \
+      /home/sandbox/.cache \
+      /home/sandbox/.local/share \
+      /home/sandbox/.local/state && \
+    chmod -R 777 /home/sandbox
 COPY --from=opencode /usr/local/bin/opencode /usr/local/bin/opencode
 COPY opencode-tools/scripts/. /usr/local/bin/
 COPY opencode-tools/plugin /home/sandbox/.config/opencode/plugins/

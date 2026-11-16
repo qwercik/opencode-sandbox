@@ -46,7 +46,8 @@ The script pulls a pre-built lightweight Docker image from `ghcr.io/qwercik/open
    use `/connect` inside the sandbox — the key will be saved per-project.
 3. **Per-project sessions** — each folder has its own `opencode.db` and snapshots
    in `~/.local/share/opencode-sandbox/data/<hash>/`. No sessions from other
-   projects are visible.
+   projects are visible. Shared XDG data (e.g. the OpenTUI tree-sitter cache)
+   lives in `~/.local/share/opencode-sandbox/xdg-data/`.
 4. **Updates** — every 24h it checks whether a newer version of opencode or the script
    is available and prompts `opencode-sandbox --update`.
 5. **Security** — the container runs with `--cap-drop=ALL` and `--security-opt=no-new-privileges`.

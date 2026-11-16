@@ -21,10 +21,13 @@ if [ "$PWD" = "$HOME" ]; then
   PROJECT_MOUNT="/project/$CHAT_ID"
 fi
 
-# --- per-project data directory ---
+# --- data directories ---
 
 SANDBOX_DATA="$HOME/.local/share/opencode-sandbox"
 mkdir -p "$SANDBOX_DATA"
+
+SANDBOX_XDG_DATA="$SANDBOX_DATA/xdg-data"
+mkdir -p "$SANDBOX_XDG_DATA"
 
 SANDBOX_STATE="$HOME/.local/state/opencode-sandbox"
 mkdir -p "$SANDBOX_STATE"
@@ -142,7 +145,7 @@ ENV_AGENT_FLAGS=()
 TMP_ENV=""
 if [ -f "$PWD/.env.agent" ]; then
   TMP_ENV=$(mktemp) && chmod 600 "$TMP_ENV"
-  while IFS= read -r line; do
+  while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in
       "#"*|'') continue ;;
     esac
@@ -213,6 +216,7 @@ docker run -it --rm \
   -v "${CHAT_WORKSPACE:-$PWD}:$PROJECT_MOUNT" \
   "${EXTRA_MOUNTS[@]}" \
   -v "$SANDBOX_CONFIG:/home/sandbox/.config/opencode" \
+  -v "$SANDBOX_XDG_DATA:/home/sandbox/.local/share" \
   -v "$PER_PROJECT_DIR:/home/sandbox/.local/share/opencode" \
   -v "$AUTH_FILE:/home/sandbox/.local/share/opencode/auth.json" \
   -v "$SANDBOX_STATE:/home/sandbox/.local/state" \
