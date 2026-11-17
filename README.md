@@ -52,7 +52,7 @@ The script pulls a pre-built lightweight Docker image from `ghcr.io/qwercik/open
    is available and prompts `opencode-sandbox --update`.
 5. **Security** — the container runs with `--cap-drop=ALL` and `--security-opt=no-new-privileges`.
 6. **Agent router** — the container is started with `--label agent-router.enabled=true` and `--label agent-router.name=<project-folder>` so that agent-router (e.g. Traefik) can discover and route to it.
-7. **Built-in server** — when run without arguments, the container starts the opencode TUI with its embedded HTTP server listening on `0.0.0.0:4096` inside the container. This allows agent-router (or any other service in the same Docker network) to reach the opencode API without exposing ports to the host.
+7. **Built-in server** — when run without arguments, the container starts `opencode serve` in the background (listening on `0.0.0.0:80`), waits for it to be ready, then launches the opencode TUI in the foreground. This allows agent-router (or any other service in the same Docker network) to reach the opencode API while you work in the TUI.
 8. **`.env.agent`** — if a `.env.agent` file exists in the project directory, its
    variables are loaded into the container (only safe names are accepted).
    Use `SANDBOX_NETWORK=<network-name>` in `.env.agent` to attach the container
@@ -71,7 +71,7 @@ The script pulls a pre-built lightweight Docker image from `ghcr.io/qwercik/open
 
 | Command | Effect |
 |---------|--------|
-| `opencode-sandbox` | Normal run — TUI with embedded server on `0.0.0.0:4096` inside the container |
+| `opencode-sandbox` | Normal run — starts the headless API server in the background (`opencode serve` on `0.0.0.0:80`), then opens the TUI in the foreground |
 | `opencode-sandbox --update` | Pulls the latest image from GitHub Container Registry |
 | `opencode-sandbox --cleanup` | Prunes orphaned sandbox networks created by older versions |
 | `opencode-sandbox --version` | Shows the script version |

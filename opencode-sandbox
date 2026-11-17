@@ -202,14 +202,20 @@ fi
 
 check_versions
 
-# --- default: TUI + embedded server on port 80 inside the container ---
+# --- default: start serve as background service, then open TUI ---
 
+DOCKER_ENTRYPOINT=()
+DOCKER_CMD=("$@")
 if [ $# -eq 0 ]; then
-  set -- --hostname 0.0.0.0 --port 80
+  DOCKER_ENTRYPOINT=(--entrypoint sh)
+  DOCKER_CMD=(-c 'opencode serve --service --hostname 0.0.0.0 --port 80 >/dev/null 2>&1 &
+sleep 2
+exec opencode')
 fi
 
 docker run -it --rm \
   "${DOCKER_NET_ARGS[@]}" \
+  "${DOCKER_ENTRYPOINT[@]}" \
   --label "agent-router.enabled=true" \
   --label "agent-router.name=$(basename "$PWD")" \
   --user "$(id -u):$(id -g)" \
@@ -225,5 +231,5 @@ docker run -it --rm \
   -v "$SANDBOX_STATE:/home/sandbox/.local/state" \
   "${ENV_AGENT_FLAGS[@]}" \
   --workdir "$PROJECT_MOUNT" \
-  "$IMAGE:latest" "$@"
+  "$IMAGE:latest" "${DOCKER_CMD[@]}"
 
