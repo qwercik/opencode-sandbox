@@ -99,9 +99,12 @@ check_versions() {
 
   local oc_latest oc_current script_latest
 
-  local gh_url="https://api.github.com/repos/anomalyco/opencode/releases/latest"
-  local sed_pat='s/.*"tag_name": *"v\([^"]*\)".*/\1/p'
-  oc_latest=$(curl -sS "$gh_url" | sed -n "$sed_pat" 2>/dev/null || true)
+  local gh_url="https://api.github.com/repos/anomalyco/opencode/releases?per_page=100"
+  local sed_pat='s/.*"tag_name": *"v\([0-9]*\.[0-9]*\.[0-9]*\)".*/\1/p'
+  oc_latest=$(curl -sS "$gh_url" \
+    | sed -n "$sed_pat" 2>/dev/null \
+    | sort -u -t. -k1,1n -k2,2n -k3,3n \
+    | tail -1 || true)
   oc_latest=$(echo "$oc_latest" | grep -Ex '[0-9]+\.[0-9]+\.[0-9]+' || true)
   oc_current=$(docker image inspect "$IMAGE:latest" \
     --format '{{index .Config.Labels "org.opencontainers.image.version"}}' \
